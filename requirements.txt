@@ -4,3 +4,4 @@ pyautogui
 sounddevice
 moviepy
 mss
+pygetwindow

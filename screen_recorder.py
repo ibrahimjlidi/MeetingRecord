@@ -128,6 +128,12 @@ try:
 except ImportError:
     MSS_AVAILABLE = False
 
+try:
+    import pygetwindow as gw
+    WINDOW_DETECTION_AVAILABLE = True
+except ImportError:
+    WINDOW_DETECTION_AVAILABLE = False
+
 
 def ensure_output_dir(path: str = "recordings") -> str:
     """Create output directory if it does not exist and return the path."""
@@ -230,23 +236,151 @@ def get_available_monitors():
     return monitors
 
 
-def record_screen_region(stop_event, video_path, audio_path, final_mp4_path, monitor_info, status_callback=None):
+def get_available_windows():
+    """Get list of available application windows."""
+    windows = []
+    if WINDOW_DETECTION_AVAILABLE:
+        try:
+            all_windows = gw.getAllWindows()
+            for win in all_windows:
+                if win.title and win.visible and win.width > 0 and win.height > 0:
+                    windows.append({
+                        'title': win.title,
+                        'left': win.left,
+                        'top': win.top,
+                        'width': win.width,
+                        'height': win.height
+                    })
+        except Exception:
+            pass
+    return windows
+
+
+def select_region_interactively():
+    """Open a full-screen overlay to let user select a custom region."""
+    class RegionSelector:
+        def __init__(self):
+            self.start_x = None
+            self.start_y = None
+            self.end_x = None
+            self.end_y = None
+            self.selected = False
+            
+            self.root = tk.Tk()
+            self.root.attributes('-fullscreen', True)
+            self.root.attributes('-alpha', 0.3)
+            self.root.configure(bg='black')
+            self.root.attributes('-topmost', True)
+            
+            # Create canvas for drawing selection rectangle
+            self.canvas = tk.Canvas(self.root, highlightthickness=0, bg='black', cursor='crosshair')
+            self.canvas.pack(fill=tk.BOTH, expand=True)
+            
+            # Instructions
+            self.canvas.create_text(
+                self.root.winfo_screenwidth() // 2,
+                50,
+                text="Click and drag to select recording area | Press ESC to cancel",
+                fill='white',
+                font=('Arial', 16, 'bold')
+            )
+            
+            self.canvas.bind('<Button-1>', self.on_click)
+            self.canvas.bind('<B1-Motion>', self.on_drag)
+            self.canvas.bind('<ButtonRelease-1>', self.on_release)
+            self.root.bind('<Escape>', self.cancel)
+            self.root.focus_set()
+            
+        def on_click(self, event):
+            self.start_x = event.x
+            self.start_y = event.y
+            self.canvas.delete('rect')
+            
+        def on_drag(self, event):
+            if self.start_x is not None:
+                self.canvas.delete('rect')
+                self.canvas.create_rectangle(
+                    self.start_x, self.start_y, event.x, event.y,
+                    outline='red', width=3, tags='rect'
+                )
+                
+        def on_release(self, event):
+            self.end_x = event.x
+            self.end_y = event.y
+            if self.start_x is not None:
+                # Ensure coordinates are correct (start < end)
+                left = min(self.start_x, self.end_x)
+                top = min(self.start_y, self.end_y)
+                right = max(self.start_x, self.end_x)
+                bottom = max(self.start_y, self.end_y)
+                
+                if abs(right - left) > 50 and abs(bottom - top) > 50:  # Minimum size
+                    self.selected = True
+                    self.region = {
+                        'left': left,
+                        'top': top,
+                        'width': right - left,
+                        'height': bottom - top
+                    }
+                    self.root.quit()
+                else:
+                    self.canvas.delete('rect')
+                    self.start_x = None
+                    
+        def cancel(self, event=None):
+            self.selected = False
+            self.root.quit()
+            
+        def get_region(self):
+            self.root.mainloop()
+            self.root.destroy()
+            return self.region if self.selected else None
+    
+    selector = RegionSelector()
+    return selector.get_region()
+
+
+def record_screen_region(stop_event, video_path, audio_path, final_mp4_path, region_info=None, status_callback=None):
     """
-    Record a specific screen region to an .avi file and microphone to .wav.
+    Record a specific screen region, window, or custom area to an .avi file and microphone to .wav.
     After recording, if moviepy is available, combine them into a single .mp4.
+    
+    region_info can be:
+    - None: Full screen
+    - dict with 'type': 'monitor', 'window', or 'custom' and corresponding coordinates
     """
     output_dir = ensure_output_dir()
     
-    # Get screen dimensions
-    if monitor_info:
-        screen_size = (monitor_info['width'], monitor_info['height'])
+    # Determine recording region
+    if region_info and region_info.get('type') == 'window':
+        # Window recording
         region = {
-            'left': monitor_info['left'],
-            'top': monitor_info['top'],
-            'width': monitor_info['width'],
-            'height': monitor_info['height']
+            'left': region_info['left'],
+            'top': region_info['top'],
+            'width': region_info['width'],
+            'height': region_info['height']
+        }
+        screen_size = (region_info['width'], region_info['height'])
+    elif region_info and region_info.get('type') == 'custom':
+        # Custom region
+        region = {
+            'left': region_info['left'],
+            'top': region_info['top'],
+            'width': region_info['width'],
+            'height': region_info['height']
+        }
+        screen_size = (region_info['width'], region_info['height'])
+    elif region_info and region_info.get('type') == 'monitor':
+        # Monitor recording
+        screen_size = (region_info['width'], region_info['height'])
+        region = {
+            'left': region_info['left'],
+            'top': region_info['top'],
+            'width': region_info['width'],
+            'height': region_info['height']
         }
     else:
+        # Full screen fallback
         screen_size = pyautogui.size()
         region = None
 
@@ -264,17 +398,16 @@ def record_screen_region(stop_event, video_path, audio_path, final_mp4_path, mon
 
     try:
         if MSS_AVAILABLE and region:
-            # Use mss for multi-monitor support
+            # Use mss for region/window/monitor recording
             with mss.mss() as sct:
                 while not stop_event.is_set():
-                    # Capture specific monitor
                     screenshot = sct.grab(region)
                     frame = np.array(screenshot)
                     # mss returns BGRA, convert to BGR
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                     out.write(frame)
         else:
-            # Fallback to pyautogui
+            # Fallback to pyautogui (full screen only)
             while not stop_event.is_set():
                 img = pyautogui.screenshot()  # PIL Image in RGB
                 frame = np.array(img)
@@ -449,7 +582,7 @@ class ScreenRecorderGUI:
         self.root.title("Meeting Recorder")
 
         # Modern window sizing & centering
-        window_width, window_height = 460, 460
+        window_width, window_height = 500, 520
         screen_w = root.winfo_screenwidth()
         screen_h = root.winfo_screenheight()
         x = int((screen_w - window_width) / 2)
@@ -516,6 +649,8 @@ class ScreenRecorderGUI:
         self.stop_event = None
         self.recording_thread = None
         self.monitors = get_available_monitors()
+        self.windows = get_available_windows() if WINDOW_DETECTION_AVAILABLE else []
+        self.selected_region = None
 
         # Main card container
         outer = tk.Frame(self.root, bg="#f5f7fb")
@@ -549,24 +684,90 @@ class ScreenRecorderGUI:
         )
         subtitle.pack(anchor="w", pady=(2, 8))
 
-        # Screen selection row
-        row = ttk.Frame(card, style="Card.TFrame")
-        row.pack(fill="x", pady=(4, 8))
-
-        ttk.Label(row, text="Screen to record:").pack(side=tk.LEFT)
-
+        # Recording mode selection
+        mode_frame = ttk.Frame(card, style="Card.TFrame")
+        mode_frame.pack(fill="x", pady=(4, 8))
+        
+        ttk.Label(mode_frame, text="Recording mode:").pack(anchor="w")
+        
+        self.mode_var = tk.StringVar(value="monitor")
+        mode_options_frame = ttk.Frame(mode_frame, style="Card.TFrame")
+        mode_options_frame.pack(fill="x", pady=(4, 0))
+        
+        ttk.Radiobutton(
+            mode_options_frame,
+            text="Full Screen",
+            variable=self.mode_var,
+            value="monitor",
+            command=self.on_mode_change
+        ).pack(side=tk.LEFT, padx=(0, 16))
+        
+        ttk.Radiobutton(
+            mode_options_frame,
+            text="Window",
+            variable=self.mode_var,
+            value="window",
+            command=self.on_mode_change
+        ).pack(side=tk.LEFT, padx=(0, 16))
+        
+        ttk.Radiobutton(
+            mode_options_frame,
+            text="Custom Region",
+            variable=self.mode_var,
+            value="custom",
+            command=self.on_mode_change
+        ).pack(side=tk.LEFT)
+        
+        # Dynamic selection frame
+        self.selection_frame = ttk.Frame(card, style="Card.TFrame")
+        self.selection_frame.pack(fill="x", pady=(8, 0))
+        
+        # Monitor selection
+        self.monitor_row = ttk.Frame(self.selection_frame, style="Card.TFrame")
+        ttk.Label(self.monitor_row, text="Select monitor:").pack(side=tk.LEFT)
         self.screen_var = tk.StringVar()
         self.screen_combo = ttk.Combobox(
-            row,
+            self.monitor_row,
             textvariable=self.screen_var,
             state="readonly",
-            width=28,
+            width=25,
         )
         screen_options = [f"Screen {m['index'] + 1}  ({m['width']}×{m['height']})" for m in self.monitors]
         self.screen_combo["values"] = screen_options
         if screen_options:
             self.screen_combo.current(0)
         self.screen_combo.pack(side=tk.LEFT, padx=(8, 0))
+        
+        # Window selection
+        self.window_row = ttk.Frame(self.selection_frame, style="Card.TFrame")
+        ttk.Label(self.window_row, text="Select window:").pack(side=tk.LEFT)
+        self.window_var = tk.StringVar()
+        self.window_combo = ttk.Combobox(
+            self.window_row,
+            textvariable=self.window_var,
+            state="readonly",
+            width=25,
+        )
+        window_options = [f"{w['title'][:40]} ({w['width']}×{w['height']})" for w in self.windows[:50]]  # Limit to 50 windows
+        self.window_combo["values"] = window_options
+        if window_options:
+            self.window_combo.current(0)
+        self.window_combo.pack(side=tk.LEFT, padx=(8, 0))
+        
+        # Custom region button
+        self.custom_row = ttk.Frame(self.selection_frame, style="Card.TFrame")
+        self.select_region_btn = ttk.Button(
+            self.custom_row,
+            text="Select Region",
+            command=self.select_custom_region,
+            width=20
+        )
+        self.select_region_btn.pack(side=tk.LEFT)
+        self.region_label = ttk.Label(self.custom_row, text="", style="Subtitle.TLabel")
+        self.region_label.pack(side=tk.LEFT, padx=(8, 0))
+        
+        # Show initial mode
+        self.on_mode_change()
 
         # Start/Stop button centered
         btn_frame = ttk.Frame(card, style="Card.TFrame")
@@ -595,6 +796,48 @@ class ScreenRecorderGUI:
                 anchor="w", pady=(2, 0)
             )
         
+    def on_mode_change(self):
+        """Update UI based on selected recording mode."""
+        mode = self.mode_var.get()
+        
+        # Hide all selection rows
+        self.monitor_row.pack_forget()
+        self.window_row.pack_forget()
+        self.custom_row.pack_forget()
+        
+        # Show appropriate selection
+        if mode == "monitor":
+            self.monitor_row.pack(fill="x", pady=(4, 0))
+        elif mode == "window":
+            if not WINDOW_DETECTION_AVAILABLE:
+                messagebox.showwarning("Window Detection", "Install 'pygetwindow' for window selection:\npy -m pip install pygetwindow")
+                self.mode_var.set("monitor")
+                self.on_mode_change()
+                return
+            if not self.windows:
+                messagebox.showwarning("No Windows", "No windows detected. Please open some applications.")
+                self.mode_var.set("monitor")
+                self.on_mode_change()
+                return
+            self.window_row.pack(fill="x", pady=(4, 0))
+        elif mode == "custom":
+            self.custom_row.pack(fill="x", pady=(4, 0))
+    
+    def select_custom_region(self):
+        """Open region selector overlay."""
+        self.root.withdraw()  # Hide main window
+        region = select_region_interactively()
+        self.root.deiconify()  # Show main window again
+        
+        if region:
+            self.selected_region = region
+            self.region_label.config(
+                text=f"Region: {region['width']}×{region['height']} at ({region['left']}, {region['top']})"
+            )
+        else:
+            self.selected_region = None
+            self.region_label.config(text="")
+    
     def toggle_recording(self):
         if not self.is_recording:
             self.start_recording()
@@ -602,15 +845,55 @@ class ScreenRecorderGUI:
             self.stop_recording()
     
     def start_recording(self):
-        if not self.monitors:
-            messagebox.showerror("Error", "No monitors detected!")
-            return
+        mode = self.mode_var.get()
+        region_info = None
         
-        selected_index = self.screen_combo.current()
-        if selected_index < 0:
-            selected_index = 0
-        
-        monitor_info = self.monitors[selected_index]
+        if mode == "monitor":
+            if not self.monitors:
+                messagebox.showerror("Error", "No monitors detected!")
+                return
+            selected_index = self.screen_combo.current()
+            if selected_index < 0:
+                selected_index = 0
+            monitor = self.monitors[selected_index]
+            region_info = {
+                'type': 'monitor',
+                'left': monitor['left'],
+                'top': monitor['top'],
+                'width': monitor['width'],
+                'height': monitor['height']
+            }
+            status_text = f"Recording screen {monitor['index'] + 1}…"
+            
+        elif mode == "window":
+            if not self.windows:
+                messagebox.showerror("Error", "No windows available!")
+                return
+            selected_index = self.window_combo.current()
+            if selected_index < 0:
+                selected_index = 0
+            window = self.windows[selected_index]
+            region_info = {
+                'type': 'window',
+                'left': window['left'],
+                'top': window['top'],
+                'width': window['width'],
+                'height': window['height']
+            }
+            status_text = f"Recording window: {window['title'][:30]}…"
+            
+        elif mode == "custom":
+            if not self.selected_region:
+                messagebox.showwarning("No Region", "Please select a custom region first.")
+                return
+            region_info = {
+                'type': 'custom',
+                'left': self.selected_region['left'],
+                'top': self.selected_region['top'],
+                'width': self.selected_region['width'],
+                'height': self.selected_region['height']
+            }
+            status_text = f"Recording custom region ({region_info['width']}×{region_info['height']})…"
         
         # Generate filenames
         output_dir = ensure_output_dir()
@@ -622,14 +905,16 @@ class ScreenRecorderGUI:
         # Update UI
         self.is_recording = True
         self.control_button.config(text="Stop recording", style="Danger.TButton")
-        self.status_label.config(text=f"Recording screen {monitor_info['index'] + 1}…")
+        self.status_label.config(text=status_text)
         self.screen_combo.config(state="disabled")
+        self.window_combo.config(state="disabled")
+        self.select_region_btn.config(state="disabled")
         
         # Start recording in separate thread
         self.stop_event = threading.Event()
         self.recording_thread = threading.Thread(
             target=record_screen_region,
-            args=(self.stop_event, video_path, audio_path, final_mp4_path, monitor_info, self.update_status),
+            args=(self.stop_event, video_path, audio_path, final_mp4_path, region_info, self.update_status),
             daemon=True
         )
         self.recording_thread.start()
@@ -653,6 +938,8 @@ class ScreenRecorderGUI:
         self.is_recording = False
         self.control_button.config(text="Start recording", style="Primary.TButton", state="normal")
         self.screen_combo.config(state="readonly")
+        self.window_combo.config(state="readonly")
+        self.select_region_btn.config(state="normal")
         if "Success" in self.status_label.cget("text"):
             self.status_label.config(text="Recording saved successfully!")
         else:
