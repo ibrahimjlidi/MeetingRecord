@@ -104,6 +104,7 @@ import threading
 import queue
 import tkinter as tk
 from tkinter import ttk, messagebox
+import time
 
 try:
     import sounddevice as sd
@@ -582,7 +583,7 @@ class ScreenRecorderGUI:
         self.root.title("Meeting Recorder")
 
         # Modern window sizing & centering
-        window_width, window_height = 500, 520
+        window_width, window_height = 480, 580
         screen_w = root.winfo_screenwidth()
         screen_h = root.winfo_screenheight()
         x = int((screen_w - window_width) / 2)
@@ -590,8 +591,15 @@ class ScreenRecorderGUI:
         self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
         self.root.resizable(False, False)
 
-        # Set a light-modern background
-        self.root.configure(bg="#f5f7fb")
+        # Dark theme background
+        dark_bg = "#1e1e1e"
+        dark_card = "#2d2d2d"
+        dark_text = "#e0e0e0"
+        dark_text_sub = "#a0a0a0"
+        accent_red = "#dc2626"
+        accent_blue = "#3b82f6"
+        
+        self.root.configure(bg=dark_bg)
 
         # Use ttk themed widgets
         style = ttk.Style()
@@ -600,34 +608,35 @@ class ScreenRecorderGUI:
         except Exception:
             pass
 
-        # Colors
-        primary_color = "#2563eb"   # blue-600
-        danger_color = "#dc2626"    # red-600
-        text_main = "#111827"
-        text_sub = "#6b7280"
-
+        # Dark theme styles
         style.configure(
             "Card.TFrame",
-            background="#ffffff",
+            background=dark_card,
             relief="flat",
         )
         style.configure(
             "Title.TLabel",
-            background="#ffffff",
-            foreground=text_main,
-            font=("Segoe UI", 16, "bold"),
+            background=dark_card,
+            foreground=dark_text,
+            font=("Segoe UI", 14, "bold"),
         )
         style.configure(
             "Subtitle.TLabel",
-            background="#ffffff",
-            foreground=text_sub,
+            background=dark_card,
+            foreground=dark_text_sub,
             font=("Segoe UI", 9),
         )
         style.configure(
             "TLabel",
-            background="#ffffff",
-            foreground=text_main,
+            background=dark_card,
+            foreground=dark_text,
             font=("Segoe UI", 10),
+        )
+        style.configure(
+            "Timer.TLabel",
+            background=dark_card,
+            foreground="#ffffff",
+            font=("Segoe UI", 24, "bold"),
         )
         style.configure(
             "TButton",
@@ -636,33 +645,67 @@ class ScreenRecorderGUI:
         )
         style.map(
             "Primary.TButton",
-            background=[("!disabled", primary_color), ("pressed", "#1d4ed8"), ("active", "#1d4ed8")],
+            background=[("!disabled", accent_blue), ("pressed", "#2563eb"), ("active", "#2563eb")],
             foreground=[("!disabled", "white")],
         )
         style.map(
             "Danger.TButton",
-            background=[("!disabled", danger_color), ("pressed", "#b91c1c"), ("active", "#b91c1c")],
+            background=[("!disabled", accent_red), ("pressed", "#b91c1c"), ("active", "#b91c1c")],
             foreground=[("!disabled", "white")],
         )
+        style.map(
+            "Stop.TButton",
+            background=[("!disabled", accent_red), ("pressed", "#b91c1c"), ("active", "#b91c1c")],
+            foreground=[("!disabled", "white")],
+        )
+        
+        # Radio button dark theme
+        style.configure(
+            "TRadiobutton",
+            background=dark_card,
+            foreground=dark_text,
+            font=("Segoe UI", 9),
+        )
+        style.map(
+            "TRadiobutton",
+            background=[("selected", dark_card)],
+            foreground=[("selected", dark_text)],
+        )
+        
+        # Combobox dark theme
+        style.configure(
+            "TCombobox",
+            fieldbackground=dark_card,
+            background=dark_card,
+            foreground=dark_text,
+            borderwidth=1,
+        )
+
+        # Store theme colors on the instance before creating child widgets
+        self.dark_bg = dark_bg
+        self.dark_card = dark_card
+        self.dark_text = dark_text
+        self.dark_text_sub = dark_text_sub
+        self.accent_red = accent_red
+        self.accent_blue = accent_blue
 
         self.is_recording = False
         self.stop_event = None
         self.recording_thread = None
+        self.record_start_time = None
+        self.timer_job = None
         self.monitors = get_available_monitors()
         self.windows = get_available_windows() if WINDOW_DETECTION_AVAILABLE else []
         self.selected_region = None
 
         # Main card container
-        outer = tk.Frame(self.root, bg="#f5f7fb")
-        outer.pack(fill="both", expand=True, padx=16, pady=16)
+        outer = tk.Frame(self.root, bg=self.dark_bg)
+        outer.pack(fill="both", expand=True, padx=12, pady=12)
 
-        card = ttk.Frame(outer, style="Card.TFrame", padding=16)
+        card = ttk.Frame(outer, style="Card.TFrame", padding=20)
         card.pack(fill="both", expand=True)
 
         self.card = card
-        self.primary_color = primary_color
-        self.danger_color = danger_color
-        self.text_sub = text_sub
 
         # Create GUI elements
         self.create_widgets()
@@ -672,7 +715,7 @@ class ScreenRecorderGUI:
 
         # Header
         header = ttk.Frame(card, style="Card.TFrame")
-        header.pack(fill="x")
+        header.pack(fill="x", pady=(0, 8))
 
         title_label = ttk.Label(header, text="Meeting Recorder", style="Title.TLabel")
         title_label.pack(anchor="w")
@@ -682,7 +725,7 @@ class ScreenRecorderGUI:
             text="Capture screen + microphone into a single MP4 file.",
             style="Subtitle.TLabel",
         )
-        subtitle.pack(anchor="w", pady=(2, 8))
+        subtitle.pack(anchor="w", pady=(2, 0))
 
         # Recording mode selection
         mode_frame = ttk.Frame(card, style="Card.TFrame")
@@ -769,9 +812,53 @@ class ScreenRecorderGUI:
         # Show initial mode
         self.on_mode_change()
 
-        # Start/Stop button centered
+        # Timer Status Panel (prominent display like Capture Status)
+        timer_frame = tk.Frame(card, bg=self.dark_card, relief="flat")
+        timer_frame.pack(fill="x", pady=(16, 12), padx=0)
+        
+        # Left side: Recording indicator + Timer
+        timer_left = tk.Frame(timer_frame, bg=self.dark_card)
+        timer_left.pack(side=tk.LEFT, fill="x", expand=True, padx=12, pady=12)
+        
+        # Recording indicator circle (hidden initially)
+        self.recording_indicator = tk.Canvas(timer_left, width=16, height=16, bg=self.dark_card, highlightthickness=0)
+        self.recording_indicator.pack(side=tk.LEFT, padx=(0, 12))
+        self.indicator_circle = self.recording_indicator.create_oval(4, 4, 12, 12, fill="#666666", outline="")
+        
+        # Timer display (large and prominent)
+        self.timer_label = tk.Label(
+            timer_left,
+            text="0:00:00",
+            bg=self.dark_card,
+            fg="#ffffff",
+            font=("Segoe UI", 28, "bold"),
+            anchor="w"
+        )
+        self.timer_label.pack(side=tk.LEFT, fill="x", expand=True)
+        
+        # Right side: Stop button (hidden initially)
+        timer_right = tk.Frame(timer_frame, bg=self.dark_card)
+        timer_right.pack(side=tk.RIGHT, padx=(0, 12), pady=8)
+        
+        self.stop_button = tk.Button(
+            timer_right,
+            text="⏹",
+            command=self.toggle_recording,
+            bg=self.accent_red,
+            fg="white",
+            font=("Segoe UI", 14),
+            relief="flat",
+            bd=0,
+            width=3,
+            height=1,
+            cursor="hand2",
+            state="disabled"
+        )
+        self.stop_button.pack()
+
+        # Start/Stop button
         btn_frame = ttk.Frame(card, style="Card.TFrame")
-        btn_frame.pack(fill="x", pady=(12, 6))
+        btn_frame.pack(fill="x", pady=(8, 6))
 
         self.control_button = ttk.Button(
             btn_frame,
@@ -904,6 +991,11 @@ class ScreenRecorderGUI:
         
         # Update UI
         self.is_recording = True
+        self.record_start_time = time.time()
+        self.start_timer()
+        # Show recording indicator and stop button
+        self.recording_indicator.itemconfig(self.indicator_circle, fill=self.accent_red)
+        self.stop_button.config(state="normal")
         self.control_button.config(text="Stop recording", style="Danger.TButton")
         self.status_label.config(text=status_text)
         self.screen_combo.config(state="disabled")
@@ -924,6 +1016,10 @@ class ScreenRecorderGUI:
             self.stop_event.set()
             self.status_label.config(text="Stopping recording…")
             self.control_button.config(state="disabled")
+            # Stop timer; final update will happen in reset_ui
+            if self.timer_job is not None:
+                self.root.after_cancel(self.timer_job)
+                self.timer_job = None
     
     def update_status(self, message):
         """Update status label from recording thread."""
@@ -936,14 +1032,34 @@ class ScreenRecorderGUI:
     def reset_ui(self):
         """Reset UI to initial state."""
         self.is_recording = False
+        # Hide recording indicator and stop button
+        self.recording_indicator.itemconfig(self.indicator_circle, fill="#666666")
+        self.stop_button.config(state="disabled")
         self.control_button.config(text="Start recording", style="Primary.TButton", state="normal")
         self.screen_combo.config(state="readonly")
         self.window_combo.config(state="readonly")
         self.select_region_btn.config(state="normal")
+        self.record_start_time = None
+        self.timer_label.config(text="0:00:00")
         if "Success" in self.status_label.cget("text"):
             self.status_label.config(text="Recording saved successfully!")
         else:
             self.status_label.config(text="Ready to record")
+
+    def start_timer(self):
+        """Start or continue updating the elapsed time label."""
+        if not self.is_recording or self.record_start_time is None:
+            return
+
+        elapsed = int(time.time() - self.record_start_time)
+        hours = elapsed // 3600
+        minutes = (elapsed % 3600) // 60
+        seconds = elapsed % 60
+        # Format: 0:00:00 (single digit hours, like in the image)
+        self.timer_label.config(text=f"{hours}:{minutes:02d}:{seconds:02d}")
+
+        # Schedule next update
+        self.timer_job = self.root.after(1000, self.start_timer)
 
 
 def launch_gui():
